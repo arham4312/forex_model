@@ -3,18 +3,14 @@ import json
 from openai import OpenAI
 import re
 import os
-from datetime import timedelta
+from datetime import timedelta, datetime
 
 ###############################################################################
 # 0) SET YOUR OPENAI API KEY
 ###############################################################################
-# Either set it directly:
-# Or rely on an environment variable: export OPENAI_API_KEY="..."
-# Then skip the line above.
-
 client = OpenAI(
     api_key="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"
-)
+                )
 
 ###############################################################################
 # 1) DAILY DATA: EMA(8), MACD, SHIFTED TREND
@@ -39,7 +35,6 @@ df_daily["one_ago_ema"] = df_daily["ema_8"].shift(2)
 df_daily["last_closed_macd"] = df_daily["macd_line"].shift(1)
 df_daily["one_ago_macd"] = df_daily["macd_line"].shift(2)
 
-
 def get_trend_shifted(row):
     ma_last_closed = row["last_closed_ema"]
     ma_one_ago = row["one_ago_ema"]
@@ -53,7 +48,7 @@ def get_trend_shifted(row):
         or pd.isna(macd_one_ago)
     ):
         return None
-
+        
     ma_bullish = ma_last_closed > ma_one_ago
     macd_bullish = macd_last_closed > macd_one_ago
     ma_bearish = ma_last_closed < ma_one_ago
@@ -65,7 +60,7 @@ def get_trend_shifted(row):
         return "BEARISH"
     else:
         return "DIVERGENCE"
-
+    
 
 df_daily["trend"] = df_daily.apply(get_trend_shifted, axis=1)
 df_daily.sort_values("datetime", ascending=False, inplace=True)
@@ -84,7 +79,7 @@ df_hourly.sort_values("datetime", ascending=True, inplace=True)
 df_hourly["hh_13"] = df_hourly["high"].rolling(window=13).max()
 df_hourly["ll_13"] = df_hourly["low"].rolling(window=13).min()
 df_hourly["wpr_13"] = (
-    (df_hourly["hh_13"] - df_hourly["close"])
+    (df_hourly["hh_13"] - df_hourly["close"]) 
     / (df_hourly["hh_13"] - df_hourly["ll_13"])
 ) * -100
 
@@ -94,23 +89,34 @@ df_hourly["low_prev"] = df_hourly["low"].shift(1)
 df_hourly.sort_values("datetime", ascending=False, inplace=True)
 
 ###############################################################################
-# 3) GENERATE A SIGNAL FOR A GIVEN DATE
+# 3) WRAP THE EXISTING LOGIC INTO A FUNCTION (UNCHANGED INSIDE)
 ###############################################################################
-target_date_str = "2024-07-18"
-target_date_dt = pd.to_datetime(target_date_str).date()
+def process_signal_for_date(target_date_str):
+    """
+    Runs your existing logic for a single date, including GPT call.
+    Returns:
+      - A dictionary with all trade info if a signal is generated
+      - A dictionary with {"Date": <date>, "NoSignal": "reason"} if no signal
+    """
+    # We'll track if a trade was successfully created
+    trade_data = None  
 
-# Filter daily data to find the trend
-df_daily_for_date = df_daily[df_daily["datetime"].dt.date == target_date_dt]
-if df_daily_for_date.empty:
-    print(f"No daily bar for {target_date_str}")
-else:
-    row_daily = df_daily_for_date.iloc[0]
-    daily_trend = row_daily["trend"]
-    print(f"Trend for {target_date_str}: {daily_trend}")
+    target_date_dt = pd.to_datetime(target_date_str).date()
 
-    if daily_trend not in ["BULLISH", "BEARISH"]:
-        print("No signal: trend is either DIVERGENCE or None.")
+    # This entire block is your existing logic, unmodified except we store results
+    # in a local dictionary or set "no signal" accordingly.
+    df_daily_for_date = df_daily[df_daily["datetime"].dt.date == target_date_dt]
+    if df_daily_for_date.empty:
+        return {"Date": target_date_str, "NoSignal": "No daily bar"}
     else:
+        row_daily = df_daily_for_date.iloc[0]
+        daily_trend = row_daily["trend"]
+        print(f"Trend for {target_date_str}: {daily_trend}")
+
+        if daily_trend not in ["BULLISH", "BEARISH"]:
+            # Divergence or None => no signal
+            return {"Date": target_date_str, "NoSignal": "Trend is DIVERGENCE or None"}
+
         # For the selected date, filter hourly data
         df_hourly.sort_values("datetime", ascending=True, inplace=True)
         day_start = pd.to_datetime(target_date_str + " 00:00:00")
@@ -130,55 +136,49 @@ else:
         df_signal.sort_values("datetime", ascending=True, inplace=True)
 
         if df_signal.empty:
-            print(f"No {daily_trend} signal found for {target_date_str}")
-        else:
-            # Grab the earliest signal row
-            first_signal = df_signal.iloc[0]
-            signal_time = first_signal["datetime"]
-            wpr_value = first_signal["wpr_13"]
-            print(f"{daily_trend} signal at hour = {signal_time}, W%R={wpr_value:.2f}")
+            return {"Date": target_date_str, "NoSignal": "No W%R signal found"}
 
-            # Calculate entry_stop
-            entry_stop = None
-            if daily_trend == "BULLISH":
-                if pd.notna(first_signal["high_prev"]):
-                    last_closed_high = first_signal["high_prev"]
-                    entry_stop = last_closed_high + 0.00005  # 5 pips
-                    print(f"Entry Stop = {entry_stop} (previous high + 0.00005)")
-                else:
-                    print("No previous candle high found for that signal hour.")
-            else:  # BEARISH
-                if pd.notna(first_signal["low_prev"]):
-                    last_closed_low = first_signal["low_prev"]
-                    entry_stop = last_closed_low - 0.00005
-                    print(f"Entry Stop = {entry_stop} (previous low - 0.00005)")
-                else:
-                    print("No previous candle low found for that signal hour.")
+        # Grab the earliest signal row
+        first_signal = df_signal.iloc[0]
+        signal_time = first_signal["datetime"]
+        wpr_value = first_signal["wpr_13"]
+        print(f"{daily_trend} signal at hour = {signal_time}, W%R={wpr_value:.2f}")
 
-            if entry_stop is None:
-                # If we never got an entry_stop, no valid signal info
-                print("No valid entry stop—cannot proceed further.")
+        # Calculate entry_stop
+        entry_stop = None
+        if daily_trend == "BULLISH":
+            if pd.notna(first_signal["high_prev"]):
+                last_closed_high = first_signal["high_prev"]
+                entry_stop = last_closed_high + 0.00005  # 5 pips
+                print(f"Entry Stop = {entry_stop} (previous high + 0.00005)")
             else:
+                return {"Date": target_date_str, "NoSignal": "No previous candle high"}
+        else:  # BEARISH
+            if pd.notna(first_signal["low_prev"]):
+                last_closed_low = first_signal["low_prev"]
+                entry_stop = last_closed_low - 0.00005
+                print(f"Entry Stop = {entry_stop} (previous low - 0.00005)")
+            else:
+                return {"Date": target_date_str, "NoSignal": "No previous candle low"}
 
-                ###############################################################################
-                # 4) CALL OPENAI GPT API FOR SUPPORT / RESISTANCE
-                ###############################################################################
+        if entry_stop is None:
+            # No valid entry stop => no trade
+            return {"Date": target_date_str, "NoSignal": "entry_stop was None"}
 
-                # Example: gather last 30 days of hourly data to pass to GPT
-                start_30_days = day_start - pd.Timedelta(days=20)
+        # 4) CALL OPENAI GPT API FOR SUPPORT / RESISTANCE
+        start_30_days = day_start - pd.Timedelta(days=20)
 
-                # Re-sort df_hourly ascending to slice the 30 days easily
-                df_hourly.sort_values("datetime", ascending=True, inplace=True)
-                df_30days = df_hourly[
-                    (df_hourly["datetime"] >= start_30_days)
-                    & (df_hourly["datetime"] < day_start)
-                ].copy()
+        df_hourly.sort_values("datetime", ascending=True, inplace=True)
+        df_30days = df_hourly[
+            (df_hourly["datetime"] >= start_30_days)
+            & (df_hourly["datetime"] < day_start)
+        ].copy()
 
-                # Convert that data to CSV for GPT prompt (watch out for token limits)
-                data_string = df_30days.to_csv(index=False)
+        data_string = df_30days.to_csv(index=False)
+
 
                 # Build the prompt
-                sr_prompt = f"""
+        sr_prompt = f"""
     Identify support and resistance levels on an hourly Forex chart using a multi-timeframe approach.
     Start by analyzing higher timeframes (H4/D1) to mark major S/R zones and refine on the H1 chart.
     Focus on swing highs/lows, candle wick rejections, and psychological levels (e.g., round numbers).
@@ -204,126 +204,133 @@ else:
     {data_string}
     """
 
-                # Now we call the OpenAI ChatCompletion endpoint
-                try:
-                    response = client.chat.completions.create(
-                        model="gpt-4o",  # or "gpt-3.5-turbo", etc.
-                        messages=[
-                            {
-                                "role": "system",
-                                "content": "You are a trading assistant that outputs JSON only."
-                            },
-                            {
-                                "role": "user",
-                                "content": sr_prompt
-                            }
-                        ],
-                        temperature=0.0  # For more deterministic output
-                    )
-                    raw_content = response.choices[0].message.content
-                    raw_content_clean = re.sub(r'```(?:json)?\s*', '', raw_content)  # remove ```json or ```
-                    raw_content_clean = re.sub(r'```', '', raw_content_clean)
+        try:
+            response = client.chat.completions.create(
+                model="gpt-4o",
+                messages=[
+                    {
+                        "role": "system",
+                        "content": "You are a trading assistant that outputs JSON only."
+                    },
+                    {
+                        "role": "user",
+                        "content": sr_prompt
+                    }
+                ],
+                temperature=0.0
+            )
+            raw_content = response.choices[0].message.content
+            raw_content_clean = re.sub(r'```(?:json)?\s*', '', raw_content)
+            raw_content_clean = re.sub(r'```', '', raw_content_clean)
 
-                    try:
-                        sr_data = json.loads(raw_content_clean)
-                        support_val = float(sr_data["support"])
-                        resistance_val = float(sr_data["resistance"])
-                        print("GPT S/R =>", sr_data)
-                        print(
-                            f"Parsed => Support = {support_val}, Resistance = {resistance_val}"
-                        )
+            try:
+                sr_data = json.loads(raw_content_clean)
+                support_val = float(sr_data["support"])
+                resistance_val = float(sr_data["resistance"])
+                print("GPT S/R =>", sr_data)
+                print(f"Parsed => Support = {support_val}, Resistance = {resistance_val}")
 
-                        # 5) Compute final entry price, stop, limit, lots, etc.
-                        entry_price = None
-                        stop_price = None
-                        limit_price = None
-                        account_size = 100000  # in USD
-                        risk_pct = 0.075  # 7.5%
-                        risk_amount = account_size * risk_pct
-                        pip_cost = 10  # Approx. pip cost for EUR/USD per standard lot
-                        pip_lots = None
+                # 5) Compute final entry price, stop, limit, lots, etc.
+                entry_price = None
+                stop_price = None
+                limit_price = None
+                account_size = 100000  # in USD
+                risk_pct = 0.075       # 7.5%
+                risk_amount = account_size * risk_pct
+                pip_cost = 10          # Approx. pip cost for EUR/USD per standard lot
+                pip_lots = None
 
-                        # Condition logic
-                        if daily_trend == "BULLISH":
-                            # (resistance - entry_stop) > (entry_stop - support)
-                            condition = (resistance_val - entry_stop) > (
-                                entry_stop - support_val
-                            )
-                        else:  # BEARISH
-                            # (resistance - entry_stop) < (entry_stop - support)
-                            condition = (resistance_val - entry_stop) < (
-                                entry_stop - support_val
-                            )
+                # Condition logic
+                if daily_trend == "BULLISH":
+                    condition = (resistance_val - entry_stop) > (entry_stop - support_val)
+                else:  # BEARISH
+                    condition = (resistance_val - entry_stop) < (entry_stop - support_val)
 
-                        if condition is None:
-                            entry_price = None
-                        elif condition:
-                            # True => entry_price = entry_stop
-                            entry_price = entry_stop
-                        else:
-                            # False => midpoint formula
-                            entry_price = (
-                                (resistance_val - support_val) / 2.0
-                            ) + support_val
+                if condition is None:
+                    entry_price = None
+                elif condition:
+                    entry_price = entry_stop
+                else:
+                    entry_price = ((resistance_val - support_val) / 2.0) + support_val
 
-                        # Stop / Limit assumptions
-                        if daily_trend == "BULLISH":
-                            stop_price = support_val - 0.0005
-                            limit_price = resistance_val - 0.0001
-                        else:
-                            stop_price = resistance_val + 0.0005
-                            limit_price = support_val + 0.0001
+                # Stop / Limit
+                if daily_trend == "BULLISH":
+                    stop_price = support_val - 0.0005
+                    limit_price = resistance_val - 0.0001
+                else:
+                    stop_price = resistance_val + 0.0005
+                    limit_price = support_val + 0.0001
 
-                        # Pip-lot calculation
-                        # 1 pip = 0.0001 for EUR/USD => difference in price * 10,000 = pips
-                        # We multiply pips * pip_cost to get the $risk per lot
-                        # Then risk_amount / ($risk per lot) = number of lots
+                # Lots
+                if entry_price is not None and stop_price is not None:
+                    distance_in_pips = abs(entry_price - stop_price) * 100000
+                    risk_per_lot = distance_in_pips * pip_cost
+                    if risk_per_lot != 0:
+                        pip_lots = round(risk_amount / risk_per_lot, 2)
 
-                        if entry_price is not None and stop_price is not None:
-                            distance_in_pips = abs(entry_price - stop_price) * 100000
-                            # total risk in $ if we take 1 standard lot is (distance_in_pips * pip_cost)
-                            risk_per_lot = distance_in_pips * pip_cost
-                            if risk_per_lot != 0:
-                                pip_lots = round(risk_amount / risk_per_lot, 2)
+                print(f"Final Entry Price: {entry_price}")
+                print(f"Stop Price: {stop_price}")
+                print(f"Limit Price: {limit_price}")
+                print(f"Pip Lots: {pip_lots}")
 
-                        print(f"Final Entry Price: {entry_price}")
-                        print(f"Stop Price: {stop_price}")
-                        print(f"Limit Price: {limit_price}")
-                        print(f"Pip Lots: {pip_lots}")
+                # 6) CREATE A TRADE DATA ROW
+                trade_data = {
+                    "Date": target_date_str,
+                    "Trend": daily_trend,
+                    "SignalTime": signal_time,
+                    "WPR": wpr_value,
+                    "EntryStop": entry_stop,
+                    "Support": support_val,
+                    "Resistance": resistance_val,
+                    "EntryPrice": entry_price,
+                    "StopPrice": stop_price,
+                    "LimitPrice": limit_price,
+                    "Lots": pip_lots,
+                }
+                return trade_data
 
-                        ###########################################################################
-                        # 6) CREATE A CSV ROW WITH ALL THE TRADE INFO
-                        ###########################################################################
-                        trade_data = {
-                            "Date": target_date_str,
-                            "Trend": daily_trend,
-                            "SignalTime": signal_time,
-                            "WPR": wpr_value,
-                            "EntryStop": entry_stop,
-                            "Support": support_val,
-                            "Resistance": resistance_val,
-                            "EntryPrice": entry_price,
-                            "StopPrice": stop_price,
-                            "LimitPrice": limit_price,
-                            "Lots": pip_lots,
-                        }
+            except json.JSONDecodeError:
+                return {"Date": target_date_str, "NoSignal": "Invalid JSON from GPT"}
 
-                        # Convert to DataFrame so we can easily append it as a CSV row
-                        df_trade = pd.DataFrame([trade_data])
+        except Exception as e:
+            return {"Date": target_date_str, "NoSignal": f"OpenAI error: {str(e)}"}
 
-                        # We'll store this in "trade_signal_log.csv"
-                        # Use mode="a" to append each new signal
-                        # Write header only if file doesn't exist yet
-                        csv_filename = "trade_signal_log.csv"
-                        write_header = not os.path.exists(csv_filename)
-                        df_trade.to_csv(
-                            csv_filename, mode="a", index=False, header=write_header
-                        )
-                        print(f"Trade info appended to {csv_filename}")
 
-                    except json.JSONDecodeError:
-                        print("GPT returned invalid JSON or additional text:")
-                        print(raw_content_clean)
+###############################################################################
+# 4) LOOP OVER THE LAST 6 MONTHS UP TO 2025-02-21
+###############################################################################
+end_date = datetime(2025, 2, 21).date()
+start_date = end_date - pd.DateOffset(months=8)  # 8 months prior
 
-                except Exception as e:
-                    print("OpenAI API error:", str(e))
+# Convert to daily range (inclusive)
+date_range = pd.date_range(start=start_date, end=end_date, freq='D')
+
+csv_filename = "trade_signal_log.csv"
+write_header = not os.path.exists(csv_filename)
+
+# We'll process each day in ascending order
+for current_date in date_range:
+    day_str = current_date.strftime("%Y-%m-%d")
+    result = process_signal_for_date(day_str)
+
+    if "NoSignal" in result:
+        # No signal => store a row with a minimal set of columns
+        row_data = {
+            "Date": result["Date"],
+            "NoSignal": result["NoSignal"]
+        }
+        df_trade = pd.DataFrame([row_data])
+        df_trade.to_csv(
+            csv_filename, mode="a", index=False, header=write_header
+        )
+        write_header = False
+
+    else:
+        # We got a trade_data row => append to CSV
+        df_trade = pd.DataFrame([result])
+        df_trade.to_csv(
+            csv_filename, mode="a", index=False, header=write_header
+        )
+        write_header = False
+
+print(f"Done! Check {csv_filename} for all signals from {start_date.date()} to {end_date}.")
