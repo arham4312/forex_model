@@ -2,6 +2,7 @@ import pandas as pd
 import json
 from openai import OpenAI
 import re
+import os
 from datetime import timedelta
 
 ###############################################################################
@@ -44,6 +45,7 @@ def get_trend_shifted(row):
     ma_one_ago = row["one_ago_ema"]
     macd_last_closed = row["last_closed_macd"]
     macd_one_ago = row["one_ago_macd"]
+
     if (
         pd.isna(ma_last_closed)
         or pd.isna(ma_one_ago)
@@ -77,7 +79,6 @@ df_hourly = pd.read_csv(
     names=["date", "time", "open", "high", "low", "close", "volume"],
 )
 df_hourly["datetime"] = pd.to_datetime(df_hourly["date"] + " " + df_hourly["time"])
-# Sort ascending to compute rolling
 df_hourly.sort_values("datetime", ascending=True, inplace=True)
 
 df_hourly["hh_13"] = df_hourly["high"].rolling(window=13).max()
@@ -90,13 +91,12 @@ df_hourly["wpr_13"] = (
 df_hourly["high_prev"] = df_hourly["high"].shift(1)
 df_hourly["low_prev"] = df_hourly["low"].shift(1)
 
-# (Optional) sort descending if you want newest first for display
 df_hourly.sort_values("datetime", ascending=False, inplace=True)
 
 ###############################################################################
 # 3) GENERATE A SIGNAL FOR A GIVEN DATE
 ###############################################################################
-target_date_str = "2024-11-01"
+target_date_str = "2024-07-18"
 target_date_dt = pd.to_datetime(target_date_str).date()
 
 # Filter daily data to find the trend
@@ -112,7 +112,6 @@ else:
         print("No signal: trend is either DIVERGENCE or None.")
     else:
         # For the selected date, filter hourly data
-        # We re-sort ascending so we can find the earliest signal
         df_hourly.sort_values("datetime", ascending=True, inplace=True)
         day_start = pd.to_datetime(target_date_str + " 00:00:00")
         day_end = pd.to_datetime(target_date_str + " 23:59:59")
@@ -121,8 +120,8 @@ else:
             (df_hourly["datetime"] >= day_start) & (df_hourly["datetime"] <= day_end)
         ].copy()
 
-        # BULLISH => find the first hour W%R < -80
-        # BEARISH => find the first hour W%R > -20
+        # BULLISH => first hour W%R < -80
+        # BEARISH => first hour W%R > -20
         if daily_trend == "BULLISH":
             df_signal = df_hourly_day[df_hourly_day["wpr_13"] < -80]
         else:  # BEARISH
@@ -139,6 +138,8 @@ else:
             wpr_value = first_signal["wpr_13"]
             print(f"{daily_trend} signal at hour = {signal_time}, W%R={wpr_value:.2f}")
 
+            # Calculate entry_stop
+            entry_stop = None
             if daily_trend == "BULLISH":
                 if pd.notna(first_signal["high_prev"]):
                     last_closed_high = first_signal["high_prev"]
@@ -154,134 +155,175 @@ else:
                 else:
                     print("No previous candle low found for that signal hour.")
 
-            ###############################################################################
-            # 4) CALL OPENAI GPT API FOR SUPPORT / RESISTANCE
-            ###############################################################################
+            if entry_stop is None:
+                # If we never got an entry_stop, no valid signal info
+                print("No valid entry stop—cannot proceed further.")
+            else:
 
-            # Example: gather last 30 days of hourly data to pass to GPT
-            start_30_days = day_start - pd.Timedelta(days=20)
+                ###############################################################################
+                # 4) CALL OPENAI GPT API FOR SUPPORT / RESISTANCE
+                ###############################################################################
 
-            # Re-sort df_hourly ascending to slice the 30 days easily
-            df_hourly.sort_values("datetime", ascending=True, inplace=True)
-            df_30days = df_hourly[
-                (df_hourly["datetime"] >= start_30_days)
-                & (df_hourly["datetime"] < day_start)
-            ].copy()
+                # Example: gather last 30 days of hourly data to pass to GPT
+                start_30_days = day_start - pd.Timedelta(days=20)
 
-            # Convert that data to CSV for GPT prompt (watch out for token limits)
-            data_string = df_30days.to_csv(index=False)
+                # Re-sort df_hourly ascending to slice the 30 days easily
+                df_hourly.sort_values("datetime", ascending=True, inplace=True)
+                df_30days = df_hourly[
+                    (df_hourly["datetime"] >= start_30_days)
+                    & (df_hourly["datetime"] < day_start)
+                ].copy()
 
-            # Build the prompt
-            sr_prompt = f"""
-Identify support and resistance levels on an hourly Forex chart using a multi-timeframe approach.
-Start by analyzing higher timeframes (H4/D1) to mark major S/R zones and refine on the H1 chart.
-Focus on swing highs/lows, candle wick rejections, and psychological levels (e.g., round numbers).
-When selecting key support and resistance levels for a specific date, consider significant levels
-tested over the past 1-2 weeks (~120-240 candles) to find strong, well-tested zones.
+                # Convert that data to CSV for GPT prompt (watch out for token limits)
+                data_string = df_30days.to_csv(index=False)
 
-Ensure the chosen support and resistance have a gap of no more than 1000 pips (~0.01000),
-but if no strong levels fit within that range, select the most relevant zones outside that range.
-Prefer zones with multiple touches, rejection candles (pin bars, hammers), and high-volume reactions.
+                # Build the prompt
+                sr_prompt = f"""
+    Identify support and resistance levels on an hourly Forex chart using a multi-timeframe approach.
+    Start by analyzing higher timeframes (H4/D1) to mark major S/R zones and refine on the H1 chart.
+    Focus on swing highs/lows, candle wick rejections, and psychological levels (e.g., round numbers).
+    When selecting key support and resistance levels for a specific date, consider significant levels
+    tested over the past 1-2 weeks (~120-240 candles) to find strong, well-tested zones.
 
-Present the final support and resistance as single values based on the strongest zones.
-Format your response as JSON ONLY, following this structure:
+    Ensure the chosen support and resistance have a gap of no more than 1000 pips (~0.01000),
+    but if no strong levels fit within that range, select the most relevant zones outside that range.
+    Prefer zones with multiple touches, rejection candles (pin bars, hammers), and high-volume reactions.
 
-{{
-  "resistance": "VALUE",
-  "support": "VALUE"
-}}
+    Present the final support and resistance as single values based on the strongest zones.
+    Format your response as JSON ONLY, following this structure:
 
-Do not include any extra text or explanations, only the JSON response.
+    {{
+    "resistance": "VALUE",
+    "support": "VALUE"
+    }}
 
-CURRENT DATE: {target_date_str}
-Below is the last 30 days (hourly) data:
-{data_string}
-"""
+    Do not include any extra text or explanations, only the JSON response.
 
-            # Now we call the OpenAI ChatCompletion endpoint
-            try:
-                # response = client.chat.completions.create(
-                #     model="gpt-4o",  # or "gpt-3.5-turbo", etc.
-                #     messages=[
-                #         {
-                #             "role": "system",
-                #             "content": "You are a trading assistant that outputs JSON only."
-                #         },
-                #         {
-                #             "role": "user",
-                #             "content": sr_prompt
-                #         }
-                #     ],
-                #     temperature=0.0  # For more deterministic output
-                # )
-                # raw_content = response.choices[0].message.content
-                # raw_content_clean = re.sub(r'```(?:json)?\s*', '', raw_content)  # remove ```json or ```
-                # raw_content_clean = re.sub(r'```', '', raw_content_clean)
-                # Example: raw_content might be:
-                raw_content_clean = json.dumps(
-                    {"resistance": "1.08879", "support": "1.08081"}
-                )
+    CURRENT DATE: {target_date_str}
+    Below is the last 30 days (hourly) data:
+    {data_string}
+    """
 
+                # Now we call the OpenAI ChatCompletion endpoint
                 try:
-                    # 1) Parse JSON from GPT
-                    sr_data = json.loads(raw_content_clean)
-                    support_val = float(sr_data["support"])
-                    resistance_val = float(sr_data["resistance"])
-                    print("GPT S/R =>", sr_data)
-                    print(f"Parsed => Support = {support_val}, Resistance = {resistance_val}")
+                    response = client.chat.completions.create(
+                        model="gpt-4o",  # or "gpt-3.5-turbo", etc.
+                        messages=[
+                            {
+                                "role": "system",
+                                "content": "You are a trading assistant that outputs JSON only."
+                            },
+                            {
+                                "role": "user",
+                                "content": sr_prompt
+                            }
+                        ],
+                        temperature=0.0  # For more deterministic output
+                    )
+                    raw_content = response.choices[0].message.content
+                    raw_content_clean = re.sub(r'```(?:json)?\s*', '', raw_content)  # remove ```json or ```
+                    raw_content_clean = re.sub(r'```', '', raw_content_clean)
 
-                    # 2) Compute entry price based on your condition
-                    # daily_trend is "BULLISH" or "BEARISH"
-                    entry_price = None
-                    stop_price = None
-                    limit_price = None
-                    account_size = 100000  # in USD
-                    risk_pct = 0.075 # 0.075 = 7.5%
-                    risk_amount = account_size * risk_pct
-                    pip_cost = 10  # EURUSD pip cost in USD
-                    pip_lots = None  # Number of lots to trade
+                    try:
+                        sr_data = json.loads(raw_content_clean)
+                        support_val = float(sr_data["support"])
+                        resistance_val = float(sr_data["resistance"])
+                        print("GPT S/R =>", sr_data)
+                        print(
+                            f"Parsed => Support = {support_val}, Resistance = {resistance_val}"
+                        )
 
-
-                    if daily_trend == "BULLISH":
-                        # Condition: (RESISTANCE - ENTRY_STOP) > (ENTRY_STOP - SUPPORT)
-                        condition = (resistance_val - entry_stop) > (entry_stop - support_val)
-                    elif daily_trend == "BEARISH":
-                        # Condition: (RESISTANCE - ENTRY_STOP) < (ENTRY_STOP - SUPPORT)
-                        condition = (resistance_val - entry_stop) < (entry_stop - support_val)
-                    else:
-                        # If trend is neither BULLISH nor BEARISH, handle as needed
-                        condition = None
-
-                    # Now handle condition as a regular boolean check
-                    if condition is None:
-                        # daily_trend isn't BULLISH or BEARISH
+                        # 5) Compute final entry price, stop, limit, lots, etc.
                         entry_price = None
-                    elif condition:
-                        # If condition == True (including np.bool_(True))
-                        entry_price = entry_stop
-                    else:
-                        # If condition == False
-                        entry_price = ((resistance_val - support_val) / 2.0) + support_val
+                        stop_price = None
+                        limit_price = None
+                        account_size = 100000  # in USD
+                        risk_pct = 0.075  # 7.5%
+                        risk_amount = account_size * risk_pct
+                        pip_cost = 10  # Approx. pip cost for EUR/USD per standard lot
+                        pip_lots = None
 
-                    if daily_trend == "BULLISH":
-                        stop_price = support_val - 0.0005
-                        limit_price = resistance_val - 0.0001
-                    else:
-                        stop_price = resistance_val + 0.0005
-                        limit_price = support_val + 0.0001
-                        
-                        # Make value absolute
-                    pip_lots = round((risk_amount / abs((entry_price - stop_price ) * 100000)) / pip_cost, 2)
+                        # Condition logic
+                        if daily_trend == "BULLISH":
+                            # (resistance - entry_stop) > (entry_stop - support)
+                            condition = (resistance_val - entry_stop) > (
+                                entry_stop - support_val
+                            )
+                        else:  # BEARISH
+                            # (resistance - entry_stop) < (entry_stop - support)
+                            condition = (resistance_val - entry_stop) < (
+                                entry_stop - support_val
+                            )
 
+                        if condition is None:
+                            entry_price = None
+                        elif condition:
+                            # True => entry_price = entry_stop
+                            entry_price = entry_stop
+                        else:
+                            # False => midpoint formula
+                            entry_price = (
+                                (resistance_val - support_val) / 2.0
+                            ) + support_val
 
-                    print(f"Final Entry Price: {entry_price}")
-                    print(f"Stop Price: {stop_price}")
-                    print(f"Limit Price: {limit_price}")
-                    print(f"Pip Lots: {pip_lots}")
+                        # Stop / Limit assumptions
+                        if daily_trend == "BULLISH":
+                            stop_price = support_val - 0.0005
+                            limit_price = resistance_val - 0.0001
+                        else:
+                            stop_price = resistance_val + 0.0005
+                            limit_price = support_val + 0.0001
 
-                except json.JSONDecodeError:
-                    print("GPT returned invalid JSON or additional text:")
-                    print(raw_content_clean)
+                        # Pip-lot calculation
+                        # 1 pip = 0.0001 for EUR/USD => difference in price * 10,000 = pips
+                        # We multiply pips * pip_cost to get the $risk per lot
+                        # Then risk_amount / ($risk per lot) = number of lots
 
-            except Exception as e:
-                print("OpenAI API error:", str(e))
+                        if entry_price is not None and stop_price is not None:
+                            distance_in_pips = abs(entry_price - stop_price) * 100000
+                            # total risk in $ if we take 1 standard lot is (distance_in_pips * pip_cost)
+                            risk_per_lot = distance_in_pips * pip_cost
+                            if risk_per_lot != 0:
+                                pip_lots = round(risk_amount / risk_per_lot, 2)
+
+                        print(f"Final Entry Price: {entry_price}")
+                        print(f"Stop Price: {stop_price}")
+                        print(f"Limit Price: {limit_price}")
+                        print(f"Pip Lots: {pip_lots}")
+
+                        ###########################################################################
+                        # 6) CREATE A CSV ROW WITH ALL THE TRADE INFO
+                        ###########################################################################
+                        trade_data = {
+                            "Date": target_date_str,
+                            "Trend": daily_trend,
+                            "SignalTime": signal_time,
+                            "WPR": wpr_value,
+                            "EntryStop": entry_stop,
+                            "Support": support_val,
+                            "Resistance": resistance_val,
+                            "EntryPrice": entry_price,
+                            "StopPrice": stop_price,
+                            "LimitPrice": limit_price,
+                            "Lots": pip_lots,
+                        }
+
+                        # Convert to DataFrame so we can easily append it as a CSV row
+                        df_trade = pd.DataFrame([trade_data])
+
+                        # We'll store this in "trade_signal_log.csv"
+                        # Use mode="a" to append each new signal
+                        # Write header only if file doesn't exist yet
+                        csv_filename = "trade_signal_log.csv"
+                        write_header = not os.path.exists(csv_filename)
+                        df_trade.to_csv(
+                            csv_filename, mode="a", index=False, header=write_header
+                        )
+                        print(f"Trade info appended to {csv_filename}")
+
+                    except json.JSONDecodeError:
+                        print("GPT returned invalid JSON or additional text:")
+                        print(raw_content_clean)
+
+                except Exception as e:
+                    print("OpenAI API error:", str(e))
