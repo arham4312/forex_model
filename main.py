@@ -38,26 +38,32 @@ df_daily["one_ago_ema"] = df_daily["ema_8"].shift(2)
 df_daily["last_closed_macd"] = df_daily["macd_line"].shift(1)
 df_daily["one_ago_macd"] = df_daily["macd_line"].shift(2)
 
+
 def get_trend_shifted(row):
     ma_last_closed = row["last_closed_ema"]
     ma_one_ago = row["one_ago_ema"]
     macd_last_closed = row["last_closed_macd"]
     macd_one_ago = row["one_ago_macd"]
-    if pd.isna(ma_last_closed) or pd.isna(ma_one_ago) \
-       or pd.isna(macd_last_closed) or pd.isna(macd_one_ago):
+    if (
+        pd.isna(ma_last_closed)
+        or pd.isna(ma_one_ago)
+        or pd.isna(macd_last_closed)
+        or pd.isna(macd_one_ago)
+    ):
         return None
-    
-    ma_bullish = (ma_last_closed > ma_one_ago)
-    macd_bullish = (macd_last_closed > macd_one_ago)
-    ma_bearish = (ma_last_closed < ma_one_ago)
-    macd_bearish = (macd_last_closed < macd_one_ago)
-    
+
+    ma_bullish = ma_last_closed > ma_one_ago
+    macd_bullish = macd_last_closed > macd_one_ago
+    ma_bearish = ma_last_closed < ma_one_ago
+    macd_bearish = macd_last_closed < macd_one_ago
+
     if ma_bullish and macd_bullish:
         return "BULLISH"
     elif ma_bearish and macd_bearish:
         return "BEARISH"
     else:
         return "DIVERGENCE"
+
 
 df_daily["trend"] = df_daily.apply(get_trend_shifted, axis=1)
 df_daily.sort_values("datetime", ascending=False, inplace=True)
@@ -90,7 +96,7 @@ df_hourly.sort_values("datetime", ascending=False, inplace=True)
 ###############################################################################
 # 3) GENERATE A SIGNAL FOR A GIVEN DATE
 ###############################################################################
-target_date_str = "2024-07-18"
+target_date_str = "2024-11-01"
 target_date_dt = pd.to_datetime(target_date_str).date()
 
 # Filter daily data to find the trend
@@ -112,8 +118,7 @@ else:
         day_end = pd.to_datetime(target_date_str + " 23:59:59")
 
         df_hourly_day = df_hourly[
-            (df_hourly["datetime"] >= day_start) &
-            (df_hourly["datetime"] <= day_end)
+            (df_hourly["datetime"] >= day_start) & (df_hourly["datetime"] <= day_end)
         ].copy()
 
         # BULLISH => find the first hour W%R < -80
@@ -159,8 +164,8 @@ else:
             # Re-sort df_hourly ascending to slice the 30 days easily
             df_hourly.sort_values("datetime", ascending=True, inplace=True)
             df_30days = df_hourly[
-                (df_hourly["datetime"] >= start_30_days) &
-                (df_hourly["datetime"] < day_start)
+                (df_hourly["datetime"] >= start_30_days)
+                & (df_hourly["datetime"] < day_start)
             ].copy()
 
             # Convert that data to CSV for GPT prompt (watch out for token limits)
@@ -211,16 +216,69 @@ Below is the last 30 days (hourly) data:
                 # )
                 # raw_content = response.choices[0].message.content
                 # raw_content_clean = re.sub(r'```(?:json)?\s*', '', raw_content)  # remove ```json or ```
-                # raw_content_clean = re.sub(r'```', '', raw_content_clean)  
+                # raw_content_clean = re.sub(r'```', '', raw_content_clean)
                 # Example: raw_content might be:
-                raw_content_clean=  json.dumps({"resistance": "1.0948", "support": "1.08715"})
+                raw_content_clean = json.dumps(
+                    {"resistance": "1.08879", "support": "1.08081"}
+                )
 
                 try:
+                    # 1) Parse JSON from GPT
                     sr_data = json.loads(raw_content_clean)
                     support_val = float(sr_data["support"])
                     resistance_val = float(sr_data["resistance"])
                     print("GPT S/R =>", sr_data)
                     print(f"Parsed => Support = {support_val}, Resistance = {resistance_val}")
+
+                    # 2) Compute entry price based on your condition
+                    # daily_trend is "BULLISH" or "BEARISH"
+                    entry_price = None
+                    stop_price = None
+                    limit_price = None
+                    account_size = 100000  # in USD
+                    risk_pct = 0.075 # 0.075 = 7.5%
+                    risk_amount = account_size * risk_pct
+                    pip_cost = 10  # EURUSD pip cost in USD
+                    pip_lots = None  # Number of lots to trade
+
+
+                    if daily_trend == "BULLISH":
+                        # Condition: (RESISTANCE - ENTRY_STOP) > (ENTRY_STOP - SUPPORT)
+                        condition = (resistance_val - entry_stop) > (entry_stop - support_val)
+                    elif daily_trend == "BEARISH":
+                        # Condition: (RESISTANCE - ENTRY_STOP) < (ENTRY_STOP - SUPPORT)
+                        condition = (resistance_val - entry_stop) < (entry_stop - support_val)
+                    else:
+                        # If trend is neither BULLISH nor BEARISH, handle as needed
+                        condition = None
+
+                    # Now handle condition as a regular boolean check
+                    if condition is None:
+                        # daily_trend isn't BULLISH or BEARISH
+                        entry_price = None
+                    elif condition:
+                        # If condition == True (including np.bool_(True))
+                        entry_price = entry_stop
+                    else:
+                        # If condition == False
+                        entry_price = ((resistance_val - support_val) / 2.0) + support_val
+
+                    if daily_trend == "BULLISH":
+                        stop_price = support_val - 0.0005
+                        limit_price = resistance_val - 0.0001
+                    else:
+                        stop_price = resistance_val + 0.0005
+                        limit_price = support_val + 0.0001
+                        
+                        # Make value absolute
+                    pip_lots = round((risk_amount / abs((entry_price - stop_price ) * 100000)) / pip_cost, 2)
+
+
+                    print(f"Final Entry Price: {entry_price}")
+                    print(f"Stop Price: {stop_price}")
+                    print(f"Limit Price: {limit_price}")
+                    print(f"Pip Lots: {pip_lots}")
+
                 except json.JSONDecodeError:
                     print("GPT returned invalid JSON or additional text:")
                     print(raw_content_clean)
