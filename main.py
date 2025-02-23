@@ -61,7 +61,7 @@ df_daily["trend"] = df_daily.apply(get_trend_shifted, axis=1)
 df_daily.sort_values("datetime", ascending=False, inplace=True)
 
 # 6) Slice the latest 10 records
-daily_latest_10 = df_daily.head(100)
+daily_latest_10 = df_daily.head(10)
 
 print("===== Daily (Latest 10) with SHIFTED Trend =====")
 print(
@@ -79,10 +79,29 @@ df_hourly = pd.read_csv(
     names=["date", "time", "open", "high", "low", "close", "volume"],
 )
 
+# 1) Create a datetime
 df_hourly["datetime"] = pd.to_datetime(df_hourly["date"] + " " + df_hourly["time"])
+
+# 2) Sort ascending so rolling() goes from oldest to newest
+df_hourly.sort_values("datetime", ascending=True, inplace=True)
+
+# 3) Compute HighestHigh and LowestLow over the past 13 bars
+df_hourly["hh_13"] = df_hourly["high"].rolling(window=13).max()
+df_hourly["ll_13"] = df_hourly["low"].rolling(window=13).min()
+
+# 4) Compute Williams %R (Period=13)
+df_hourly["wpr_13"] = (
+    (df_hourly["hh_13"] - df_hourly["close"]) 
+    / (df_hourly["hh_13"] - df_hourly["ll_13"])
+) * -100
+
+# 5) If you want newest rows first now, sort descending
 df_hourly.sort_values("datetime", ascending=False, inplace=True)
 
+# 6) Get the latest 240 hourly bars
 hourly_latest_240 = df_hourly.head(240)
 
-print("----- Hourly (Latest 240 Records) -----")
-print(hourly_latest_240)
+print("----- Hourly (Latest 240 Records w/ Williams%R(13)) -----")
+print(hourly_latest_240[[
+    "datetime", "open", "high", "low", "close", "volume", "wpr_13"
+]])
