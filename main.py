@@ -30,7 +30,7 @@ app.add_middleware(
 # 0) SET YOUR OPENAI API KEY
 ###############################################################################
 client = OpenAI(
-    api_key="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"
+    api_key="SECRET"
 )
 
 ###############################################################################
