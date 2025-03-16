@@ -15,7 +15,8 @@ origins = [
     "https://forex-signals.foliumaitech.com",  # Allow frontend domain
     "http://forex-signals.foliumaitech.com",
     "http://localhost:3000",  # If testing locally
-    "http://127.0.0.1:3000"
+    "http://127.0.0.1:3000",
+    "https://forex-signals-ui.vercel.app"
 ]
 
 app.add_middleware(
