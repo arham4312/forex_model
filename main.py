@@ -1,16 +1,19 @@
+from fastapi import FastAPI, HTTPException
 import pandas as pd
 import json
-from openai import OpenAI
 import re
 import os
 from datetime import timedelta, datetime
+from openai import OpenAI
+
+app = FastAPI()
 
 ###############################################################################
 # 0) SET YOUR OPENAI API KEY
 ###############################################################################
 client = OpenAI(
     api_key="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"
-                )
+)
 
 ###############################################################################
 # 1) DAILY DATA: EMA(8), MACD, SHIFTED TREND
@@ -48,7 +51,7 @@ def get_trend_shifted(row):
         or pd.isna(macd_one_ago)
     ):
         return None
-        
+
     ma_bullish = ma_last_closed > ma_one_ago
     macd_bullish = macd_last_closed > macd_one_ago
     ma_bearish = ma_last_closed < ma_one_ago
@@ -60,7 +63,6 @@ def get_trend_shifted(row):
         return "BEARISH"
     else:
         return "DIVERGENCE"
-    
 
 df_daily["trend"] = df_daily.apply(get_trend_shifted, axis=1)
 df_daily.sort_values("datetime", ascending=False, inplace=True)
@@ -79,7 +81,7 @@ df_hourly.sort_values("datetime", ascending=True, inplace=True)
 df_hourly["hh_13"] = df_hourly["high"].rolling(window=13).max()
 df_hourly["ll_13"] = df_hourly["low"].rolling(window=13).min()
 df_hourly["wpr_13"] = (
-    (df_hourly["hh_13"] - df_hourly["close"]) 
+    (df_hourly["hh_13"] - df_hourly["close"])
     / (df_hourly["hh_13"] - df_hourly["ll_13"])
 ) * -100
 
@@ -98,13 +100,10 @@ def process_signal_for_date(target_date_str):
       - A dictionary with all trade info if a signal is generated
       - A dictionary with {"Date": <date>, "NoSignal": "reason"} if no signal
     """
-    # We'll track if a trade was successfully created
-    trade_data = None  
-
+    trade_data = None
     target_date_dt = pd.to_datetime(target_date_str).date()
 
-    # This entire block is your existing logic, unmodified except we store results
-    # in a local dictionary or set "no signal" accordingly.
+    # Filter daily data for the target date
     df_daily_for_date = df_daily[df_daily["datetime"].dt.date == target_date_dt]
     if df_daily_for_date.empty:
         return {"Date": target_date_str, "NoSignal": "No daily bar"}
@@ -114,10 +113,9 @@ def process_signal_for_date(target_date_str):
         print(f"Trend for {target_date_str}: {daily_trend}")
 
         if daily_trend not in ["BULLISH", "BEARISH"]:
-            # Divergence or None => no signal
             return {"Date": target_date_str, "NoSignal": "Trend is DIVERGENCE or None"}
 
-        # For the selected date, filter hourly data
+        # Filter hourly data for the day
         df_hourly.sort_values("datetime", ascending=True, inplace=True)
         day_start = pd.to_datetime(target_date_str + " 00:00:00")
         day_end = pd.to_datetime(target_date_str + " 23:59:59")
@@ -126,25 +124,22 @@ def process_signal_for_date(target_date_str):
             (df_hourly["datetime"] >= day_start) & (df_hourly["datetime"] <= day_end)
         ].copy()
 
-        # BULLISH => first hour W%R < -80
-        # BEARISH => first hour W%R > -20
+        # Get the first valid signal based on the trend
         if daily_trend == "BULLISH":
             df_signal = df_hourly_day[df_hourly_day["wpr_13"] < -80]
-        else:  # BEARISH
+        else:
             df_signal = df_hourly_day[df_hourly_day["wpr_13"] > -20]
 
         df_signal.sort_values("datetime", ascending=True, inplace=True)
-
         if df_signal.empty:
             return {"Date": target_date_str, "NoSignal": "No W%R signal found"}
 
-        # Grab the earliest signal row
         first_signal = df_signal.iloc[0]
         signal_time = first_signal["datetime"]
         wpr_value = first_signal["wpr_13"]
         print(f"{daily_trend} signal at hour = {signal_time}, W%R={wpr_value:.2f}")
 
-        # Calculate entry_stop
+        # Calculate entry_stop based on previous candle high/low
         entry_stop = None
         if daily_trend == "BULLISH":
             if pd.notna(first_signal["high_prev"]):
@@ -153,7 +148,7 @@ def process_signal_for_date(target_date_str):
                 print(f"Entry Stop = {entry_stop} (previous high + 0.00005)")
             else:
                 return {"Date": target_date_str, "NoSignal": "No previous candle high"}
-        else:  # BEARISH
+        else:
             if pd.notna(first_signal["low_prev"]):
                 last_closed_low = first_signal["low_prev"]
                 entry_stop = last_closed_low - 0.00005
@@ -162,47 +157,35 @@ def process_signal_for_date(target_date_str):
                 return {"Date": target_date_str, "NoSignal": "No previous candle low"}
 
         if entry_stop is None:
-            # No valid entry stop => no trade
             return {"Date": target_date_str, "NoSignal": "entry_stop was None"}
 
         # 4) CALL OPENAI GPT API FOR SUPPORT / RESISTANCE
-        start_30_days = day_start - pd.Timedelta(days=20)
-
+        start_14_days = day_start - pd.Timedelta(days=14)
         df_hourly.sort_values("datetime", ascending=True, inplace=True)
         df_30days = df_hourly[
-            (df_hourly["datetime"] >= start_30_days)
-            & (df_hourly["datetime"] < day_start)
+            (df_hourly["datetime"] >= start_14_days) & (df_hourly["datetime"] < day_start)
         ].copy()
-
         data_string = df_30days.to_csv(index=False)
 
-
-                # Build the prompt
         sr_prompt = f"""
-    Identify support and resistance levels on an hourly Forex chart using a multi-timeframe approach.
-    Start by analyzing higher timeframes (H4/D1) to mark major S/R zones and refine on the H1 chart.
-    Focus on swing highs/lows, candle wick rejections, and psychological levels (e.g., round numbers).
-    When selecting key support and resistance levels for a specific date, consider significant levels
-    tested over the past 1-2 weeks (~120-240 candles) to find strong, well-tested zones.
+Given the past 14 days of hourly EUR/USD data (Open, High, Low, Close, Volume):
+Identify the Support and Resistance levels using the following method:
 
-    Ensure the chosen support and resistance have a gap of no more than 1000 pips (~0.01000),
-    but if no strong levels fit within that range, select the most relevant zones outside that range.
-    Prefer zones with multiple touches, rejection candles (pin bars, hammers), and high-volume reactions.
+Resistance Level:
+Select the most recent prominent swing high, a price point where the market has recently struggled or failed to move above.
 
-    Present the final support and resistance as single values based on the strongest zones.
-    Format your response as JSON ONLY, following this structure:
+Support Level:
+Identify the most recent prominent swing low, a clear price level where downward movement stopped, and price moved significantly upward afterward.
 
-    {{
-    "resistance": "VALUE",
-    "support": "VALUE"
-    }}
+**Output format (STRICTLY FOLLOW THIS FORMAT):**
+{{
+  "resistance": "RESISTANCE_VALUE",
+  "support": "SUPPORT_VALUE"
+}}
 
-    Do not include any extra text or explanations, only the JSON response.
-
-    CURRENT DATE: {target_date_str}
-    Below is the last 30 days (hourly) data:
-    {data_string}
-    """
+CURRENT DATA (Last 14 Days):
+{data_string}
+"""
 
         try:
             response = client.chat.completions.create(
@@ -210,40 +193,38 @@ def process_signal_for_date(target_date_str):
                 messages=[
                     {
                         "role": "system",
-                        "content": "You are a trading assistant that outputs JSON only."
+                        "content": "You are a trading assistant that outputs JSON only.",
                     },
-                    {
-                        "role": "user",
-                        "content": sr_prompt
-                    }
+                    {"role": "user", "content": sr_prompt},
                 ],
-                temperature=0.0
+                temperature=0.0,
             )
             raw_content = response.choices[0].message.content
-            raw_content_clean = re.sub(r'```(?:json)?\s*', '', raw_content)
-            raw_content_clean = re.sub(r'```', '', raw_content_clean)
+            raw_content_clean = re.sub(r"```(?:json)?\s*", "", raw_content)
+            raw_content_clean = re.sub(r"```", "", raw_content_clean)
 
             try:
                 sr_data = json.loads(raw_content_clean)
                 support_val = float(sr_data["support"])
                 resistance_val = float(sr_data["resistance"])
                 print("GPT S/R =>", sr_data)
-                print(f"Parsed => Support = {support_val}, Resistance = {resistance_val}")
+                print(
+                    f"Parsed => Support = {support_val}, Resistance = {resistance_val}"
+                )
 
-                # 5) Compute final entry price, stop, limit, lots, etc.
+                # 5) Compute final trade parameters
                 entry_price = None
                 stop_price = None
                 limit_price = None
                 account_size = 100000  # in USD
-                risk_pct = 0.075       # 7.5%
+                risk_pct = 0.075  # 7.5%
                 risk_amount = account_size * risk_pct
-                pip_cost = 10          # Approx. pip cost for EUR/USD per standard lot
+                pip_cost = 10  # Approx. pip cost for EUR/USD per standard lot
                 pip_lots = None
 
-                # Condition logic
                 if daily_trend == "BULLISH":
                     condition = (resistance_val - entry_stop) > (entry_stop - support_val)
-                else:  # BEARISH
+                else:
                     condition = (resistance_val - entry_stop) < (entry_stop - support_val)
 
                 if condition is None:
@@ -253,7 +234,6 @@ def process_signal_for_date(target_date_str):
                 else:
                     entry_price = ((resistance_val - support_val) / 2.0) + support_val
 
-                # Stop / Limit
                 if daily_trend == "BULLISH":
                     stop_price = support_val - 0.0005
                     limit_price = resistance_val - 0.0001
@@ -261,7 +241,6 @@ def process_signal_for_date(target_date_str):
                     stop_price = resistance_val + 0.0005
                     limit_price = support_val + 0.0001
 
-                # Lots
                 if entry_price is not None and stop_price is not None:
                     distance_in_pips = abs(entry_price - stop_price) * 100000
                     risk_per_lot = distance_in_pips * pip_cost
@@ -273,7 +252,6 @@ def process_signal_for_date(target_date_str):
                 print(f"Limit Price: {limit_price}")
                 print(f"Pip Lots: {pip_lots}")
 
-                # 6) CREATE A TRADE DATA ROW
                 trade_data = {
                     "Date": target_date_str,
                     "Trend": daily_trend,
@@ -295,42 +273,38 @@ def process_signal_for_date(target_date_str):
         except Exception as e:
             return {"Date": target_date_str, "NoSignal": f"OpenAI error: {str(e)}"}
 
+###############################################################################
+# 4) FASTAPI ENDPOINT TO PROCESS A DATE RANGE AND RETURN SIGNALS
+###############################################################################
+@app.get("/signals")
+def get_signals(start_date: str, end_date: str):
+    """
+    GET endpoint to process trade signals for a given date range.
+    Query Parameters:
+      - start_date: Start date in 'YYYY-MM-DD'
+      - end_date: End date in 'YYYY-MM-DD'
+    """
+    try:
+        start_date_dt = datetime.strptime(start_date, "%Y-%m-%d").date()
+        end_date_dt = datetime.strptime(end_date, "%Y-%m-%d").date()
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Dates must be in YYYY-MM-DD format")
+
+    if start_date_dt > end_date_dt:
+        raise HTTPException(status_code=400, detail="start_date cannot be after end_date")
+
+    date_range = pd.date_range(start=start_date_dt, end=end_date_dt, freq="D")
+    results = []
+    for current_date in date_range:
+        day_str = current_date.strftime("%Y-%m-%d")
+        result = process_signal_for_date(day_str)
+        results.append(result)
+
+    return {"results": results}
 
 ###############################################################################
-# 4) LOOP OVER THE LAST 6 MONTHS UP TO 2025-02-21
+# MAIN: Run with Uvicorn
 ###############################################################################
-end_date = datetime(2025, 2, 21).date()
-start_date = end_date - pd.DateOffset(months=8)  # 8 months prior
-
-# Convert to daily range (inclusive)
-date_range = pd.date_range(start=start_date, end=end_date, freq='D')
-
-csv_filename = "trade_signal_log.csv"
-write_header = not os.path.exists(csv_filename)
-
-# We'll process each day in ascending order
-for current_date in date_range:
-    day_str = current_date.strftime("%Y-%m-%d")
-    result = process_signal_for_date(day_str)
-
-    if "NoSignal" in result:
-        # No signal => store a row with a minimal set of columns
-        row_data = {
-            "Date": result["Date"],
-            "NoSignal": result["NoSignal"]
-        }
-        df_trade = pd.DataFrame([row_data])
-        df_trade.to_csv(
-            csv_filename, mode="a", index=False, header=write_header
-        )
-        write_header = False
-
-    else:
-        # We got a trade_data row => append to CSV
-        df_trade = pd.DataFrame([result])
-        df_trade.to_csv(
-            csv_filename, mode="a", index=False, header=write_header
-        )
-        write_header = False
-
-print(f"Done! Check {csv_filename} for all signals from {start_date.date()} to {end_date}.")
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
