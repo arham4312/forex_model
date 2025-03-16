@@ -186,20 +186,23 @@ def process_signal_for_date(target_date_str):
         data_string = df_30days.to_csv(index=False)
 
         sr_prompt = f"""
-Given the past 14 days of hourly EUR/USD data (Open, High, Low, Close, Volume), identify clear Support and Resistance levels based strictly on recent price action.
+Given the past 14 days of hourly EUR/USD data (Open, High, Low, Close, Volume), identify clear Support and Resistance levels strictly based on recent price action.
 
 Important Constraint:
-Ensure the difference between the Resistance and Support levels does NOT exceed 1000-1300 pips (100-130 points). If your initial identification exceeds this range, reconsider recent levels to satisfy this constraint.
-
+Ensure the difference between the Resistance and Support levels does NOT exceed 1000-1300 pips (100-130 points). If initial selections exceed this range, adjust by selecting alternative recent, significant swing points to satisfy this constraint.
 
 Guidelines:
 
 Resistance Level:
-- Identify the most recent prominent swing high, a clear price level where the market recently faced strong rejection or struggled to move above.
-- Do NOT automatically select the absolute highest price from the entire data set; instead, focus carefully on recent significant rejections or reversal points.
+- Identify the most recent prominent swing high, clearly showing recent rejection or reversal.
+- Do NOT automatically select the highest price unless it represents the most recent significant rejection.
 
 Support Level:
-Identify the most recent significant swing low, defined as a recent price point where the downward price movement clearly stopped, leading to a meaningful upward reversal. Choose a level where the market has shown multiple rejections or at least a strong, obvious bounce upward. Avoid selecting merely the lowest price in the dataset unless it also meets these conditions.
+- Identify the most recent prominent swing low where price clearly halted downward momentum and immediately reversed upward.
+- This point must reflect a strong, obvious bounce or multiple recent rejections. Avoid selecting simply the lowest price unless it meets this condition.
+
+Priority:
+If multiple valid swing points exist, prioritize the most recent and clearly-defined reversal points.
 
 **Output format (STRICTLY FOLLOW THIS FORMAT):**
 {{
