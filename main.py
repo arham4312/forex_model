@@ -186,18 +186,21 @@ def process_signal_for_date(target_date_str):
         data_string = df_30days.to_csv(index=False)
 
         sr_prompt = f"""
-Given the past 14 days of hourly EUR/USD data (Open, High, Low, Close, Volume):
-Identify the Support and Resistance levels using the following method:
-
-Resistance Level:
-Select the most recent prominent swing high, a price point where the market has recently struggled or failed to move above.
-
-Support Level:
-Identify the most recent prominent swing low, a clear price level where downward movement stopped, and price moved significantly upward afterward.
+Given the past 14 days of hourly EUR/USD data (Open, High, Low, Close, Volume), identify clear Support and Resistance levels based strictly on recent price action.
 
 Important Constraint:
-The identified Resistance and Support levels must not exceed a maximum difference of 1000-1300 pips (100-130 points).
-If the initial Resistance and Support exceed this allowable range, adjust either the Resistance or Support level accordingly, ensuring the final difference remains within 1000-1300 pips.
+Ensure the difference between the Resistance and Support levels does NOT exceed 1000-1300 pips (100-130 points). If your initial identification exceeds this range, reconsider recent levels to satisfy this constraint.
+
+
+Guidelines:
+
+Resistance Level:
+- Identify the most recent prominent swing high, a clear price level where the market recently faced strong rejection or struggled to move above.
+- Do NOT automatically select the absolute highest price from the entire data set; instead, focus carefully on recent significant rejections or reversal points.
+
+Support Level:
+Identify the most recent significant swing low, defined as a recent price point where the downward price movement clearly stopped, leading to a meaningful upward reversal. Choose a level where the market has shown multiple rejections or at least a strong, obvious bounce upward. Avoid selecting merely the lowest price in the dataset unless it also meets these conditions.
+
 **Output format (STRICTLY FOLLOW THIS FORMAT):**
 {{
   "resistance": "RESISTANCE_VALUE",
@@ -214,7 +217,7 @@ CURRENT DATA (Last 14 Days):
                 messages=[
                     {
                         "role": "system",
-                        "content": "You are a trading assistant that outputs JSON only.",
+                        "content": "You are a trading assistant that identifies accurate Support and Resistance levels from recent market data. Always output JSON strictly in this format:\n\n{\n  \"resistance\": \"RESISTANCE_VALUE\",\n  \"support\": \"SUPPORT_VALUE\"\n}\n\nGuidelines:\n- Resistance: Select the most recent significant swing high, a clear recent price level where upward momentum halted or reversed. Do NOT simply select the highest point in the dataset unless it is the most recent rejection.\n\n- Support: Identify the most recent significant swing low, defined as a recent price point where the downward price movement clearly stopped, leading to a meaningful upward reversal. Choose a level where the market has shown multiple rejections or at least a strong, obvious bounce upward. Avoid selecting merely the lowest price in the dataset unless it also meets these conditions. \n\nImportant Constraint:\nEnsure the price difference between Resistance and Support does not exceed 1000-1300 pips (100-130 points). If it does, prioritize adjusting the Resistance or Support to maintain this pip range, keeping selections as recent and relevant as possible."
                     },
                     {"role": "user", "content": sr_prompt},
                 ],
