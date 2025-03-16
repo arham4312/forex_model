@@ -5,14 +5,32 @@ import re
 import os
 from datetime import timedelta, datetime
 from openai import OpenAI
+from fastapi.middleware.cors import CORSMiddleware
+
 
 app = FastAPI()
+
+# CORS Configuration
+origins = [
+    "https://forex-signals.foliumaitech.com",  # Allow frontend domain
+    "http://forex-signals.foliumaitech.com",
+    "http://localhost:3000",  # If testing locally
+    "http://127.0.0.1:3000"
+]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,  # Allow these domains
+    allow_credentials=True,
+    allow_methods=["*"],  # Allow all HTTP methods
+    allow_headers=["*"],  # Allow all headers
+)
 
 ###############################################################################
 # 0) SET YOUR OPENAI API KEY
 ###############################################################################
 client = OpenAI(
-    api_key="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"
+    api_key="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"
 )
 
 ###############################################################################
@@ -177,6 +195,9 @@ Select the most recent prominent swing high, a price point where the market has 
 Support Level:
 Identify the most recent prominent swing low, a clear price level where downward movement stopped, and price moved significantly upward afterward.
 
+Important Constraint:
+The identified Resistance and Support levels must not exceed a maximum difference of 1000-1300 pips (100-130 points).
+If the initial Resistance and Support exceed this allowable range, adjust either the Resistance or Support level accordingly, ensuring the final difference remains within 1000-1300 pips.
 **Output format (STRICTLY FOLLOW THIS FORMAT):**
 {{
   "resistance": "RESISTANCE_VALUE",
@@ -221,6 +242,7 @@ CURRENT DATA (Last 14 Days):
                 risk_amount = account_size * risk_pct
                 pip_cost = 10  # Approx. pip cost for EUR/USD per standard lot
                 pip_lots = None
+                distance_in_pips = None
 
                 if daily_trend == "BULLISH":
                     condition = (resistance_val - entry_stop) > (entry_stop - support_val)
@@ -264,6 +286,8 @@ CURRENT DATA (Last 14 Days):
                     "StopPrice": stop_price,
                     "LimitPrice": limit_price,
                     "Lots": pip_lots,
+                    "Pips": distance_in_pips,
+                    "Pip Cost": pip_cost,
                 }
                 return trade_data
 
